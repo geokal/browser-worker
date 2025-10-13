@@ -7,9 +7,23 @@
 	"name": "browser-worker",
 	"main": "src/index.js",
 	"compatibility_date": "2025-10-11",
+	"compatibility_flags": ["nodejs_compat"],
 	"observability": {
 		"enabled": true
-	}
+	},
+	"browser": {
+		"binding": "MYBROWSER"
+	},
+	"vars": {
+		"LOGIN_URL": "https://academyhub.gr",
+		"LOGIN_SUBMIT_SELECTOR": ".auth0-lock-submit"
+	},
+	"kv_namespaces": [
+		{
+		"binding": "BROWSER_KV_DEMO",
+		"id": "1deb245552e742a28518621907c3d803"
+		}
+	]
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -40,4 +54,5 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 	 */
 	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
+
 }
