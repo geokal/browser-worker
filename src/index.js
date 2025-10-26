@@ -12,7 +12,8 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-import puppeteer from "@cloudflare/puppeteer";
+import { Stagehand } from "@browserbasehq/stagehand";
+import { endpointURLString } from "@cloudflare/playwright";
 
 // Utility function to mask sensitive data in logs
 function maskSecrets(key, value) {
@@ -266,10 +267,16 @@ export default {
 
       // Generate fresh screenshot if not cached
       if (img === null) {
-        log(env, 'info', 'fetch: launching browser for fresh screenshot');
-        const browser = await puppeteer.launch(env.MYBROWSER);
-        const page = await browser.newPage();
-        log(env, 'debug', 'fetch: browser launched, page created');
+        log(env, 'info', 'fetch: initializing Stagehand for fresh screenshot');
+        const stagehand = new Stagehand({
+          env: "LOCAL",
+          localBrowserLaunchOptions: { cdpUrl: endpointURLString(env.BROWSER) },
+          verbose: 1,
+          enableCaching: false,
+        });
+        await stagehand.init();
+        const page = stagehand.page;
+        log(env, 'debug', 'fetch: Stagehand initialized, page ready');
         // Handle login if required, then navigate to target page
         if (loginUrl) {
           if (!env.LOGIN_USER || !env.LOGIN_PASS) {
@@ -296,8 +303,8 @@ export default {
         log(env, 'debug', 'fetch: screenshot taken', { size: img ? img.length : 0 });
         // Skip caching screenshots - always generate fresh ones
         log(env, 'info', 'fetch: screenshot caching disabled');
-         await browser.close();
-         log(env, 'info', 'fetch: browser closed');
+         await stagehand.close();
+         log(env, 'info', 'fetch: Stagehand closed');
       }
       log(env, 'info', 'fetch: returning screenshot', { url, size: img ? img.byteLength : 0 });
       return new Response(img, {
@@ -307,10 +314,16 @@ export default {
       });
     } else if (loginUrl) {
       // Login-only mode: perform login and screenshot the resulting page
-      const browser = await puppeteer.launch(env.MYBROWSER);
-      const page = await browser.newPage();
+      const stagehand = new Stagehand({
+        env: "LOCAL",
+        localBrowserLaunchOptions: { cdpUrl: endpointURLString(env.BROWSER) },
+        verbose: 1,
+        enableCaching: false,
+      });
+      await stagehand.init();
+      const page = stagehand.page;
       if (!env.LOGIN_USER || !env.LOGIN_PASS) {
-        await browser.close();
+        await stagehand.close();
         return new Response('Missing LOGIN_USER / LOGIN_PASS in environment', { status: 400 });
       }
       await ensureLoggedIn(page, env, loginUrl, `cookies:${loginUrl}`);
@@ -320,7 +333,7 @@ export default {
         quality: screenshotType === 'jpeg' ? (screenshotQuality || 80) : undefined,
         clip: (screenshotWidth && screenshotHeight) ? { x: 0, y: 0, width: screenshotWidth, height: screenshotHeight } : undefined,
       });
-      await browser.close();
+      await stagehand.close();
       return new Response(imgAfterLogin, { headers: { 'content-type': 'image/jpeg' } });
     } else {
       // No URL or login specified - return help message

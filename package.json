@@ -1,5 +1,5 @@
 {
-	"name": "browser-worker",
+	"name": "stagehand-example",
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
@@ -8,8 +8,13 @@
 		"start": "wrangler dev",
 		"test": "vitest"
 	},
+	"dependencies": {
+		"@browserbasehq/stagehand": "^2.5.0",
+		"@cloudflare/playwright": "^1.0.0",
+		"zod": "^3.25.76",
+		"zod-to-json-schema": "^3.24.6"
+	},
 	"devDependencies": {
-		"@cloudflare/puppeteer": "^1.0.4",
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.42.2"
