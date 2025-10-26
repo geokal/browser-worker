@@ -1,15 +1,20 @@
 /**
- * Welcome to Cloudflare Workers! This is your first worker.
+ * Browser Worker - Auth0 Login and Screenshot Service
  *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
+ * This Cloudflare Worker automates login to Auth0-protected sites and takes screenshots.
+ * It uses Puppeteer to control a headless browser, handles session cookies via KV storage,
+ * and supports various configuration options for different login flows.
+ *
+ * Usage:
+ * - Run `npm run dev` to start development server
+ * - Run `npm run deploy` to publish to production
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
 import puppeteer from "@cloudflare/puppeteer";
 
+// Utility function to mask sensitive data in logs
 function maskSecrets(key, value) {
   if (!key) return value;
   const secretKeys = ['LOGIN_PASS', 'LOGIN_USER', 'password', 'passwd'];
@@ -17,6 +22,7 @@ function maskSecrets(key, value) {
   return value;
 }
 
+// Logging utility with configurable debug level and secret masking
 function log(env, level, message, meta) {
   // If env.DEBUG is set to 'false' explicitly, don't log. Otherwise log by default.
   try {
@@ -43,9 +49,11 @@ function log(env, level, message, meta) {
   }
 }
 
+// Main login function that handles cookie restoration and fresh login
 async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUrl = null) {
   log(env, 'debug', 'ensureLoggedIn: attempting to restore cookies', { cookieKey });
-  // Try to restore cookies from KV
+
+  // Phase 1: Try to restore existing session from KV storage
   try {
     const saved = await env.BROWSER_KV_DEMO.get(cookieKey);
     if (saved) {
@@ -54,10 +62,12 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
       if (cookies && cookies.length) {
         await page.setCookie(...cookies);
         log(env, 'debug', 'ensureLoggedIn: set cookies on page', { count: cookies.length });
-        // navigate to confirm session is valid
+
+        // Test if session is still valid by navigating to login page
         await page.goto(loginUrl, { waitUntil: 'networkidle0' });
         log(env, 'debug', 'ensureLoggedIn: navigated to loginUrl to validate session', { loginUrl });
-        // simple check for a logged-in indicator — replace with a selector appropriate for your site
+
+        // Check for success indicators to confirm we're logged in
         if (env.LOGIN_SUCCESS_SELECTOR) {
           if (await page.$(env.LOGIN_SUCCESS_SELECTOR)) {
             log(env, 'info', 'ensureLoggedIn: session appears valid via LOGIN_SUCCESS_SELECTOR', { selector: env.LOGIN_SUCCESS_SELECTOR });
@@ -70,36 +80,35 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
       }
     }
   } catch (e) {
-    // restore failed — fall through to fresh login
+    // Cookie restore failed - proceed to fresh login
     log(env, 'warn', 'ensureLoggedIn: cookie restore failed, will attempt fresh login', { error: e && e.message });
   }
 
-  // Perform form-based login using selectors (customize via env bindings if needed)
-  // Provide helpful defaults: check common input names used by Auth0 Lock
+  // Phase 2: Perform fresh login if session restoration failed
+  // Configure selectors for form fields (customizable via environment variables)
   const userSelector = env.LOGIN_USER_SELECTOR || 'input[name="email"], input[name="username"], #username';
   const passSelector = env.LOGIN_PASS_SELECTOR || 'input[name="password"], #password';
-  // default submit selector: prefer Auth0 Lock class, then normal submit, then escaped id
   const submitSelector = env.LOGIN_SUBMIT_SELECTOR || '.auth0-lock-submit, button[type="submit"], #\\31 -submit';
   const successSelector = env.LOGIN_SUCCESS_SELECTOR || null;
 
   log(env, 'info', 'ensureLoggedIn: navigating to login page', { loginUrl });
   await page.goto(loginUrl, { waitUntil: 'networkidle0' });
 
-  // Wait for Lock container (if present) to render, but don't fail if it doesn't appear
+  // Wait for Auth0 Lock UI to load (optional, for Auth0 sites)
   try {
     await page.waitForSelector('.auth0-lock-container', { timeout: 5000 });
   } catch (e) {
-    // ignore - will still try to find inputs
+    // Ignore if not an Auth0 site - continue with form detection
   }
 
-  // Wait for username input to appear (longer timeout)
+  // Wait for login form inputs to be available
   try {
     await page.waitForSelector(userSelector, { timeout: 15000 });
   } catch (e) {
     console.warn('username selector not found within timeout:', userSelector);
   }
 
-  // Type credentials only if fields are present
+  // Fill in login credentials
   try {
     const userEl = await page.$(userSelector);
     if (userEl) {
@@ -124,20 +133,19 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
     log(env, 'error', 'ensureLoggedIn: failed to type password', { error: e && e.message });
   }
 
-  // Prepare watchers: navigation and optional success selector
+  // Set up watchers for login completion: either navigation or success element appearing
   const navPromise = page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => null);
   const successPromise = successSelector ? page.waitForSelector(successSelector, { timeout: 15000 }).catch(() => null) : Promise.resolve(null);
 
-  // Click submit (best-effort) and wait for either navigation or success element
+  // Submit the login form
   try {
-    // attempt to click the preferred submit selector
     log(env, 'debug', 'ensureLoggedIn: attempting to click submit', { submitSelector });
     await page.click(submitSelector).catch(() => null);
   } catch (e) {
     log(env, 'warn', 'ensureLoggedIn: click submit failed', { error: e && e.message });
   }
 
-  // Special handling: detect Auth0's form_post response which renders a form that must be submitted to the callback URL
+  // Handle Auth0's form_post response mode (common in OAuth flows)
   try {
     const frames = page.frames();
     let submitted = false;
@@ -146,14 +154,16 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
         const postForms = await frame.$$('form[method="post"]');
         if (!postForms || !postForms.length) continue;
         log(env, 'debug', 'ensureLoggedIn: found post forms in frame', { frame: frame.url(), count: postForms.length });
+
         for (const f of postForms) {
           try {
             const action = await frame.evaluate((form) => form.action || form.getAttribute('action'), f).catch(() => null);
             log(env, 'debug', 'ensureLoggedIn: post form action', { action, frame: frame.url() });
+
+            // Check if this looks like an OAuth callback form
             const looksLikeCallback = action && (action.indexOf('callback') !== -1 || (expectedRedirectUrl && action.indexOf(expectedRedirectUrl) !== -1));
             if (looksLikeCallback || !expectedRedirectUrl) {
               log(env, 'info', 'ensureLoggedIn: submitting post form in frame', { action, frame: frame.url() });
-              // submit the form in its frame context
               await frame.evaluate((form) => form.submit(), f).catch(() => null);
               await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }).catch(() => null);
               log(env, 'info', 'ensureLoggedIn: post form submitted and navigation complete', { url: page.url() });
@@ -165,7 +175,6 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
           }
         }
       } catch (e) {
-        // ignore frame-level errors
         log(env, 'debug', 'ensureLoggedIn: error scanning frame for post forms', { frame: frame.url(), error: e && e.message });
       }
       if (submitted) break;
@@ -175,14 +184,14 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
     log(env, 'debug', 'ensureLoggedIn: error checking for post forms', { error: e && e.message });
   }
 
-  // Wait for either navigation or a success selector to appear
+  // Wait for login completion: either navigation or success element
   try {
     await Promise.race([navPromise, successPromise]);
   } catch (e) {
-    // ignore - we'll continue to redirect detection below
+    log(env, 'debug', 'ensureLoggedIn: race condition resolved, continuing');
   }
 
-  // If an expected redirect URL was provided, wait for the page to reach it
+  // Handle final redirect to target application
   try {
     if (expectedRedirectUrl) {
       log(env, 'info', 'ensureLoggedIn: waiting for expected redirect URL', { expectedRedirectUrl });
@@ -191,13 +200,12 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
         { timeout: 30000 },
         expectedRedirectUrl
       );
-      // wait briefly for network to settle
       await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => null);
       log(env, 'info', 'ensureLoggedIn: expected redirect reached', { url: page.url() });
       return page.url();
     }
 
-    // Otherwise wait until we're no longer on the login page (i.e., a redirect happened)
+    // Default: wait for navigation away from login page
     log(env, 'debug', 'ensureLoggedIn: waiting for navigation away from loginUrl', { loginUrl });
     await page.waitForFunction((login) => window.location.href !== login, { timeout: 30000 }, loginUrl).catch(() => null);
     await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => null);
@@ -206,7 +214,7 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
     log(env, 'warn', 'ensureLoggedIn: redirect wait failed or timed out', { error: e && e.message });
   }
 
-  // Persist cookies to KV for reuse
+  // Save session cookies to KV for future requests (7-day TTL)
   try {
     const cookies = await page.cookies();
     await env.BROWSER_KV_DEMO.put(cookieKey, JSON.stringify(cookies), { expirationTtl: 60 * 60 * 24 * 7 });
@@ -218,20 +226,23 @@ async function ensureLoggedIn(page, env, loginUrl, cookieKey, expectedRedirectUr
 
 export default {
   async fetch(request, env) {
+    // Main request handler - processes screenshot requests with optional login
     const { searchParams } = new URL(request.url);
     log(env, 'info', 'fetch: incoming request', { url: request.url, method: request.method });
-  // prefer query params, fall back to environment vars (set via .env for dev or wrangler vars/secrets)
-  let url = searchParams.get("url") || env.TARGET_URL;
-  const loginUrl = searchParams.get("login") || env.LOGIN_URL;
+
+    // Parse query parameters with environment fallbacks
+    let url = searchParams.get("url") || env.TARGET_URL;
+    const loginUrl = searchParams.get("login") || env.LOGIN_URL;
     const action = searchParams.get('action');
-    // screenshot options (query params override env vars)
+    const nocache = searchParams.get('nocache');
+    // Configure screenshot options (query params override environment variables)
     const screenshotType = (searchParams.get('type') || env.SCREENSHOT_TYPE || 'jpeg').toLowerCase();
     const screenshotFullPage = (searchParams.get('fullPage') || env.SCREENSHOT_FULLPAGE || 'true') === 'true';
     const screenshotWidth = searchParams.get('width') ? Number(searchParams.get('width')) : (env.SCREENSHOT_WIDTH ? Number(env.SCREENSHOT_WIDTH) : undefined);
     const screenshotHeight = searchParams.get('height') ? Number(searchParams.get('height')) : (env.SCREENSHOT_HEIGHT ? Number(env.SCREENSHOT_HEIGHT) : undefined);
     const screenshotQuality = searchParams.get('quality') ? Number(searchParams.get('quality')) : (env.SCREENSHOT_QUALITY ? Number(env.SCREENSHOT_QUALITY) : undefined);
     let img;
-    // Cookie-clear endpoint: ?action=clear-cookies&login=<loginUrl>
+    // Handle special actions like clearing cookies
     if (action === 'clear-cookies') {
       if (!loginUrl) return new Response('Missing login URL for clearing cookies', { status: 400 });
       try {
@@ -241,45 +252,52 @@ export default {
         return new Response(`Failed to clear cookies: ${e.message}`, { status: 500 });
       }
     }
+    // Main screenshot logic: check cache or generate fresh screenshot
     if (url) {
-      url = new URL(url).toString(); // normalize
-      log(env, 'debug', 'fetch: checking KV for cached screenshot', { url });
-      img = await env.BROWSER_KV_DEMO.get(url, { type: "arrayBuffer" });
+      url = new URL(url).toString(); // normalize URL
+
+      // Check for cached screenshot unless nocache is requested
+      if (!nocache) {
+        log(env, 'debug', 'fetch: checking KV for cached screenshot', { url });
+        img = await env.BROWSER_KV_DEMO.get(url, { type: "arrayBuffer" });
+      } else {
+        img = null; // force fresh screenshot when nocache is set
+      }
+
+      // Generate fresh screenshot if not cached
       if (img === null) {
-        log(env, 'info', 'fetch: launching browser');
+        log(env, 'info', 'fetch: launching browser for fresh screenshot');
         const browser = await puppeteer.launch(env.MYBROWSER);
         const page = await browser.newPage();
-        // If a login URL was supplied and credentials exist, ensure we're logged in first
+        log(env, 'debug', 'fetch: browser launched, page created');
+        // Handle login if required, then navigate to target page
         if (loginUrl) {
           if (!env.LOGIN_USER || !env.LOGIN_PASS) {
             await browser.close();
             return new Response('Missing LOGIN_USER / LOGIN_PASS in environment', { status: 400 });
           }
-          // Pass the desired final URL as the expected redirect target so ensureLoggedIn waits for it
+          // Perform login and wait for redirect to target URL
           const finalAfterLogin = await ensureLoggedIn(page, env, loginUrl, `cookies:${loginUrl}`, url);
-          // If ensureLoggedIn returned a different URL, use it as the page to screenshot
           const screenshotUrl = finalAfterLogin || url;
           log(env, 'debug', 'fetch: navigating to final screenshot URL', { screenshotUrl });
           await page.goto(screenshotUrl, { waitUntil: 'networkidle0' }).catch(() => null);
         } else {
+          // No login required - navigate directly to target URL
           await page.goto(url);
         }
+        // Capture the screenshot with configured options
+        log(env, 'debug', 'fetch: taking screenshot', { url, type: screenshotType, fullPage: screenshotFullPage });
         img = await page.screenshot({
           type: screenshotType === 'png' ? 'png' : 'jpeg',
           fullPage: screenshotFullPage,
           quality: screenshotType === 'jpeg' ? (screenshotQuality || 80) : undefined,
           clip: (screenshotWidth && screenshotHeight) ? { x: 0, y: 0, width: screenshotWidth, height: screenshotHeight } : undefined,
         });
-        try {
-          await env.BROWSER_KV_DEMO.put(url, img, {
-            expirationTtl: 60 * 60 * 24,
-          });
-          log(env, 'info', 'fetch: cached screenshot to KV', { url });
-        } catch (e) {
-          log(env, 'warn', 'fetch: failed to cache screenshot', { error: e && e.message });
-        }
-        await browser.close();
-        log(env, 'info', 'fetch: browser closed');
+        log(env, 'debug', 'fetch: screenshot taken', { size: img ? img.length : 0 });
+        // Skip caching screenshots - always generate fresh ones
+        log(env, 'info', 'fetch: screenshot caching disabled');
+         await browser.close();
+         log(env, 'info', 'fetch: browser closed');
       }
       log(env, 'info', 'fetch: returning screenshot', { url, size: img ? img.byteLength : 0 });
       return new Response(img, {
@@ -288,7 +306,7 @@ export default {
         },
       });
     } else if (loginUrl) {
-      // No explicit target URL provided but a login URL exists — perform login and screenshot the page after login
+      // Login-only mode: perform login and screenshot the resulting page
       const browser = await puppeteer.launch(env.MYBROWSER);
       const page = await browser.newPage();
       if (!env.LOGIN_USER || !env.LOGIN_PASS) {
@@ -305,6 +323,7 @@ export default {
       await browser.close();
       return new Response(imgAfterLogin, { headers: { 'content-type': 'image/jpeg' } });
     } else {
+      // No URL or login specified - return help message
       return new Response("Please add an ?url=https://example.com/ parameter or set TARGET_URL in your environment");
     }
   },

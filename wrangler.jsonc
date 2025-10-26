@@ -15,8 +15,8 @@
 		"binding": "MYBROWSER"
 	},
 	"vars": {
-		"LOGIN_URL": "https://academyhub.gr",
-		"LOGIN_SUBMIT_SELECTOR": ".auth0-lock-submit"
+		"LOGIN_SUBMIT_SELECTOR": ".auth0-lock-submit",
+		"LOGIN_SUCCESS_SELECTOR": ".main"
 	},
 	"kv_namespaces": [
 		{
